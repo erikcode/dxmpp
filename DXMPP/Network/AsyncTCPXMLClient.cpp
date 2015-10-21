@@ -26,19 +26,6 @@ else std::cout
         using namespace boost::asio;
         using namespace pugi;
 
-
-        std::unique_ptr<pugi::xml_document> AsyncTCPXMLClient::FetchDocument()
-        {
-            boost::unique_lock<boost::shared_mutex> Lock(IncomingDocumentsMutex);
-            if( IncomingDocuments.empty() )
-                return nullptr;
-
-            std::unique_ptr<pugi::xml_document> RVal(IncomingDocuments.front());
-            IncomingDocuments.pop();
-
-            return RVal;
-        }
-
         void AsyncTCPXMLClient::ClearReadDataStream()
         {
             ReadDataStream->str(string(""));
@@ -114,12 +101,17 @@ else std::cout
 
             if( bytes_transferred > 0 )
             {
+                for( int i = 0; i < bytes_transferred; i++ )
+                {
+                    this->IncomingBuffer.push(ReadDataBuffer[i]);
+                }
+                /*
                 std::stringstream TStream;
                 TStream.write(ReadDataBuffer, bytes_transferred);
                 ReadDataStream->str(ReadDataStream->str() + TStream.str());
                 DebugOut(DebugOutputTreshold::Debug).write(ReadDataBuffer, bytes_transferred);
-                DebugOut(DebugOutputTreshold::Debug) << flush;
-                GotDataCallback();
+                DebugOut(DebugOutputTreshold::Debug) << flush;*/
+                //GotDataCallback();
             }
             AsyncRead();
         }
@@ -222,75 +214,6 @@ else std::cout
                 ES->EndPosition = XML_GetCurrentByteIndex(ES->Parser) + XML_GetCurrentByteCount(ES->Parser);
             }
         }
-
-
-        bool AsyncTCPXMLClient::InnerLoadXML()
-        {
-            string jox = ReadDataStream->str();
-
-            if(jox.empty())
-                return false;
-
-            string CompleteXML;
-            XML_Parser p = XML_ParserCreate(NULL);
-            ExpatStructure ExpatData(this, p);
-
-            XML_SetUserData( p, &ExpatData );
-            XML_SetElementHandler(p, SAXStartElementHandler, SAXEndElementHandler);
-
-            XML_Parse(p, jox.c_str(), jox.length(), true);
-            XML_ParserFree(p);
-
-            if( ExpatData.EndPosition == 0 )
-            {
-                //std::cerr << "incomplete: " << jox << std::endl;
-                return false;
-            }
-
-            CompleteXML = jox.substr(0, ExpatData.EndPosition);
-            string NewXML = jox.substr(CompleteXML.length());
-            //std::cout << "new xml:" << endl << "#" << NewXML <<  "#" << endl;
-            ReadDataStream->str(NewXML);
-
-            istringstream TStream(CompleteXML);
-
-            pugi::xml_document *NewDoc = new pugi::xml_document();
-
-            xml_parse_result parseresult =
-                    NewDoc->load(TStream, parse_full&~parse_eol, encoding_auto);
-
-            if(parseresult.status != xml_parse_status::status_ok)
-            {
-                std::cerr << "Failed to parse xml: " << CompleteXML << std::endl;
-                delete NewDoc;
-                return true;
-            }
-
-            boost::unique_lock<boost::shared_mutex> Lock(IncomingDocumentsMutex);
-            IncomingDocuments.push(NewDoc);
-
-            DebugOut(DebugOutputTreshold::Debug) << std::endl
-                << "++++++++++++++++++++++++++++++" << std::endl;
-            DebugOut(DebugOutputTreshold::Debug) << CompleteXML;
-            DebugOut(DebugOutputTreshold::Debug) << std::endl
-                << "------------------------------" << std::endl;
-            return true;
-        }
-
-        void AsyncTCPXMLClient::LoadXML()
-        {
-            if( ReadDataStream->str().empty() )
-                return;
-
-            //std::cout << "+++before inner load xmls: "<<std::endl << ReadDataStream->str() << std::endl  << "---before inner load xmls" <<std::endl;
-
-            while(InnerLoadXML())
-            {
-                // Do nothing
-            }
-            //std::cout << "+++after inner load xmls: "<<std::endl << ReadDataStream->str() << std::endl  << "---after inner load xmls" <<std::endl;
-        }
-
 
         void AsyncTCPXMLClient::WriteXMLToSocket(xml_document *Doc)
         {

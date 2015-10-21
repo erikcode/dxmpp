@@ -37,11 +37,16 @@
 #include <sstream>
 #include <queue>
 
+#include <xercesc/util/BinInputStream.hpp>
+#include <xercesc/sax/InputSource.hpp>
+
+
 namespace DXMPP
 {
     namespace Network
     {
-        class AsyncTCPXMLClient
+        class AsyncTCPXMLClient :
+                public xercesc::BinInputStream
         {
             TLSVerification *TLSConfig;
             DebugOutputTreshold DebugTreshold;
@@ -49,6 +54,8 @@ namespace DXMPP
             static const int ReadDataBufferSize = 1024;
             char ReadDataBufferNonSSL[ReadDataBufferSize];
             std::stringstream ReadDataStreamNonSSL;
+
+            std::queue<XMLByte> IncomingBuffer;
 
             char ReadDataBufferSSL[ReadDataBufferSize];
             std::stringstream ReadDataStreamSSL;
@@ -66,8 +73,8 @@ namespace DXMPP
             //boost::shared_mutex WriteMutex;
             boost::posix_time::ptime LastWrite;
 
-            boost::shared_mutex IncomingDocumentsMutex;
-            std::queue<pugi::xml_document*> IncomingDocuments;
+            //boost::shared_mutex IncomingDocumentsMutex;
+            //std::queue<pugi::xml_document*> IncomingDocuments;
 
             std::queue<std::shared_ptr<std::string>> OutgoingData;
             boost::shared_mutex OutgoingDataMutex;
@@ -76,6 +83,33 @@ namespace DXMPP
             void FlushOutgoingDataUnsafe();
 
         public:
+
+            // Start Xerces Bininput
+
+            XMLFilePos 	curPos () const
+            {
+                return 1;
+            }
+
+            XMLSize_t readBytes (XMLByte *const toFill, const XMLSize_t maxToRead)
+            {
+                XMLSize_t Count= 0;
+
+                for( ; Count < maxToRead && !IncomingBuffer.empty(); Count++ )
+                {
+                    XMLByte TData;
+                    TData = IncomingBuffer.front();
+                    IncomingBuffer.pop();
+                    toFill[Count] = TData;
+                }
+                return Count;
+            }
+
+            const XMLCh * 	getContentType () const
+            {
+                return nullptr;
+            }
+
 
             void FlushOutgoingData();
 
@@ -131,23 +165,19 @@ namespace DXMPP
             bool InnerLoadXML();
             void LoadXML();
 
-            std::unique_ptr<pugi::xml_document>  FetchDocument();
-
             void ClearReadDataStream();
 
             void Reset();
 
 
-            ~AsyncTCPXMLClient()
+            virtual ~AsyncTCPXMLClient()
             {
             }
 
 
             typedef boost::function<void (void)> ErrorCallbackFunction;
-            typedef boost::function<void (void)> GotDataCallbackFunction;
 
             ErrorCallbackFunction ErrorCallback;
-            GotDataCallbackFunction GotDataCallback;
 
             AsyncTCPXMLClient(
                                boost::shared_ptr<boost::asio::io_service> IOService,
@@ -155,7 +185,6 @@ namespace DXMPP
                                const std::string &Hostname,
                                int Portnumber,
                                const ErrorCallbackFunction &ErrorCallback,
-                               const GotDataCallbackFunction &GotDataCallback,
                                DebugOutputTreshold DebugTreshold = DebugOutputTreshold::Error)
                 :
                   TLSConfig(TLSConfig),
@@ -163,14 +192,67 @@ namespace DXMPP
                   SSLBuffer( boost::asio::buffer(ReadDataBufferSSL, ReadDataBufferSize) ),
                   NonSSLBuffer( boost::asio::buffer(ReadDataBufferNonSSL, ReadDataBufferSize) ),
                   SynchronizationStrand(*IOService),
-                  ErrorCallback(ErrorCallback),
-                  GotDataCallback(GotDataCallback)
+                  ErrorCallback(ErrorCallback)
 
             {
                 this->io_service = IOService;
                 this->Hostname = Hostname;
                 this->Portnumber = Portnumber;
                 Flushing = false;
+            }
+        };
+
+        class AsyncTCPXMLClientXercesInputWrapper:
+                public xercesc::InputSource
+        {
+            AsyncTCPXMLClient *Client;
+        public:
+
+            AsyncTCPXMLClientXercesInputWrapper(AsyncTCPXMLClient *Client)
+                :Client(Client)
+            {
+            }
+
+            virtual ~AsyncTCPXMLClientXercesInputWrapper()
+            {
+            }
+
+            xercesc::BinInputStream *makeStream() const
+            {
+                return Client;
+            }
+
+            const XMLCh * getEncoding() const
+            {
+                return nullptr;
+            }
+
+            const XMLCh * getPublicId()	const
+            {
+                return nullptr;
+            }
+
+
+            const XMLCh * getSystemId()const
+            {
+                return nullptr;
+            }
+
+            void setEncoding(const XMLCh *const encodingStr	)
+            {
+            }
+
+
+            void setIssueFatalErrorIfNotFound(const bool flag)
+            {
+            }
+
+            void setPublicId(const XMLCh *const publicId)
+            {
+            }
+
+            void setSystemId(const XMLCh *const systemId)
+            {
             }
         };
     }

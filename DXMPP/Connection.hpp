@@ -29,6 +29,9 @@
 
 #include <sstream>
 
+#include <xercesc/sax2/DefaultHandler.hpp>
+#include <xercesc/sax2/SAX2XMLReader.hpp>
+
 
 
 namespace DXMPP
@@ -37,7 +40,8 @@ namespace DXMPP
 
     class Connection
             :
-            public boost::enable_shared_from_this<Connection>
+            public boost::enable_shared_from_this<Connection>,
+            public xercesc::DefaultHandler
     {
         enum class ConnectionState
         {
@@ -72,7 +76,9 @@ namespace DXMPP
         boost::shared_ptr<DXMPP::Network::AsyncTCPXMLClient> Client;
 
         DebugOutputTreshold DebugTreshold;
-
+        std::unique_ptr<pugi::xml_document> ActiveDocument;
+        boost::shared_mutex ActiveDocumentMutex;
+        std::queue<pugi::xml_node> ActiveDocumentNodes;
 
 
         bool FeaturesSASL_DigestMD5;
@@ -121,7 +127,7 @@ namespace DXMPP
         void StartBind();
 
         void ClientDisconnected();
-        void ClientGotData();
+        //void ClientGotData();
 
         void BrodcastConnectionState(ConnectionCallback::ConnectionState NewState);
 
@@ -139,7 +145,23 @@ namespace DXMPP
             TLSVerificationMode VerificationMode = TLSVerificationMode::RFC2818_Hostname,
             DebugOutputTreshold DebugTreshold = DebugOutputTreshold::Error);
 
+        xercesc::SAX2XMLReader* SAXParser;
     public:
+
+        // Start Xerces SAX handler
+
+        void startElement(
+                const   XMLCh* const    uri,
+                const   XMLCh* const    localname,
+                const   XMLCh* const    qname,
+                const   xercesc::Attributes&     attrs
+            );
+
+        void endElement(const XMLCh* const uri, const XMLCh* const localname, const XMLCh* const qname);
+        void characters(const XMLCh* const chars, const XMLSize_t length);
+        void fatalError(const xercesc::SAXParseException& ex);
+
+        // End Xerces SAX handler
 
         void Reconnect();
         RosterMaintaner *Roster;

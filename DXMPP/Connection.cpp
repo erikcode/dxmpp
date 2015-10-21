@@ -18,6 +18,10 @@
 #include <DXMPP/SASL/SASLMechanism_DIGEST_MD5.hpp>
 #include <DXMPP/SASL/SASLMechanism_SCRAM_SHA1.hpp>
 #include <DXMPP/SASL/SASLMechanism_PLAIN.hpp>
+#include <xercesc/sax2/XMLReaderFactory.hpp>
+#include <xercesc/sax2/SAX2XMLReader.hpp>
+#include <xercesc/sax2/DefaultHandler.hpp>
+#include <xercesc/sax2/Attributes.hpp>
 
 namespace DXMPP
 {
@@ -28,6 +32,7 @@ else std::cout
 
     using namespace std;
     using namespace pugi;
+    using namespace xercesc;
 
 
     void Connection::BrodcastConnectionState(ConnectionCallback::ConnectionState NewState)
@@ -42,6 +47,79 @@ else std::cout
         ConnectionHandler->ConnectionStateChanged(NewState, shared_from_this());
     }
 
+    void Connection::startElement(
+            const   XMLCh* const    uri,
+            const   XMLCh* const    localname,
+            const   XMLCh* const    qname,
+            const   xercesc::Attributes&     attrs
+        )
+    {
+        char* tagname = XMLString::transcode(localname);
+        if(ActiveDocument == nullptr)
+        {
+            ActiveDocument.reset( new pugi::xml_document() );
+        }
+        pugi::xml_node NewNode = ActiveDocument->append_child(tagname);
+        ActiveDocumentNodes.push(NewNode);
+
+        //cout << "<" << tagname;
+        // Attributes
+        for( XMLSize_t i = 0; i < attrs.getLength(); i++ )
+        {
+            char *AttrName = XMLString::transcode(attrs.getLocalName(i) );
+            char *AttrValue= XMLString::transcode(attrs.getValue(i) );
+
+            //cout << " " << AttrName << "=\"" << AttrValue << "\"";
+
+            pugi::xml_attribute NewAttribute = NewNode.append_attribute(AttrName);
+
+            NewAttribute.set_value(AttrValue);
+
+            XMLString::release(&AttrName);
+            XMLString::release(&AttrValue);
+        }
+
+        //cout << ">";
+        XMLString::release(&tagname);
+    }
+
+    void Connection::endElement(const XMLCh* const uri, const XMLCh* const localname, const XMLCh* const qname)
+    {
+        char* tagname = XMLString::transcode(localname);
+        if( strncmp(tagname, "</stream:stream>", sizeof("</stream:stream>")) == 0 )
+        {
+            std::cerr << "Got end of stream from xmppserver" << std::endl;
+            Client->ClearReadDataStream();
+            CurrentConnectionState = ConnectionState::ErrorUnknown;
+            BrodcastConnectionState(ConnectionCallback::ConnectionState::ErrorUnknown);
+            DebugOut(DebugOutputTreshold::Debug) << "Got stream end" << std::endl;
+        }
+
+        //cout << "</" << tagname << ">" << std::endl;
+        XMLString::release(&tagname);
+
+        ActiveDocumentNodes.pop();
+        if( ActiveDocumentNodes.size() == 0 )
+        {
+            CheckStreamForValidXML();
+        }
+    }
+
+    void Connection::characters(const XMLCh* const chars, const XMLSize_t length)
+    {
+       char* Data = XMLString::transcode(chars);
+       //cout << "+++" << Data << "---";
+       pugi::xml_node &ActiveNode = ActiveDocumentNodes.back();
+       std::string Temp = std::string(ActiveNode.text().as_string()) + std::string(Data);
+       ActiveNode.set_value( Temp.c_str() );
+       XMLString::release(&Data);
+    }
+
+
+    void Connection::fatalError(const xercesc::SAXParseException& ex)
+    {
+        std::cerr << "Got sax exception: " << ex.getMessage() << std::endl;
+    }
 
     void Connection::OpenXMPPStream()
     {
@@ -188,26 +266,6 @@ else std::cout
             BrodcastConnectionState(ConnectionCallback::ConnectionState::ErrorUnknown);
         }
 
-    }
-
-    // Explicit string hax
-    void Connection::CheckForStreamEnd()
-    {
-        string str = Client->ReadDataStream->str();
-        size_t streamend = str.find("</stream:stream>");
-        if(streamend == string::npos)
-            streamend = str.find("</stream>");
-
-        if(streamend == string::npos)
-            return;
-
-        std::cerr << "Got end of stream from xmppserver" << std::endl;
-        Client->ClearReadDataStream();
-
-        CurrentConnectionState = ConnectionState::ErrorUnknown;
-        BrodcastConnectionState(ConnectionCallback::ConnectionState::ErrorUnknown);
-
-        DebugOut(DebugOutputTreshold::Debug) << "Got stream end" << std::endl;
     }
 
     void Connection::CheckForTLSProceed(pugi::xml_document* Doc)
@@ -421,46 +479,48 @@ else std::cout
             BrodcastConnectionState(ConnectionCallback::ConnectionState::Connecting);
             CheckStreamForFeatures();
             return;
-        }
+        }        
 
-        Client->LoadXML();
-        std::unique_ptr<pugi::xml_document> Doc;
-        int NrFetched = 0;
-        do
+        std::unique_ptr<pugi::xml_document> Document = nullptr;
         {
-            Doc = Client->FetchDocument();
-            if(Doc == nullptr)
-                break;
+            boost::unique_lock<boost::shared_mutex> Lock(ActiveDocumentMutex);
 
-            NrFetched++;
-
-            switch(CurrentConnectionState)
+            if(ActiveDocument == nullptr)
             {
-                case ConnectionState::WaitingForSession:
-                    BrodcastConnectionState(ConnectionCallback::ConnectionState::Connecting);
-                    CheckForWaitingForSession(Doc.get());
-                    break;
-                case ConnectionState::WaitingForFeatures:
-                    break;
-                case ConnectionState::Authenticating:
-                    BrodcastConnectionState(ConnectionCallback::ConnectionState::Connecting);
-                    CheckStreamForAuthenticationData(Doc.get());
-                    break;
-                case ConnectionState::Connected:
-                    BrodcastConnectionState(ConnectionCallback::ConnectionState::Connected);
-                    CheckForPresence(Doc.get());
-                    if(CheckStreamForStanza(Doc.get()))
-                    {
-                        DispatchStanza(std::move(Doc));
-                    }
-                    break;
-            default:
-                break;
+                std::cout << "Active document is nullptr?" << std::endl;
+                return;
             }
 
-        }while(true);
+            Document = std::move(ActiveDocument);
+            ActiveDocument = nullptr;
+        }
 
-        CheckForStreamEnd();
+
+        switch(CurrentConnectionState)
+        {
+            case ConnectionState::WaitingForSession:
+                BrodcastConnectionState(ConnectionCallback::ConnectionState::Connecting);
+                CheckForWaitingForSession(Document.get());
+                break;
+            case ConnectionState::WaitingForFeatures:
+                break;
+            case ConnectionState::Authenticating:
+                BrodcastConnectionState(ConnectionCallback::ConnectionState::Connecting);
+                CheckStreamForAuthenticationData(Document.get());
+                break;
+            case ConnectionState::Connected:
+                BrodcastConnectionState(ConnectionCallback::ConnectionState::Connected);
+                CheckForPresence(Document.get());
+                if(CheckStreamForStanza(Document.get()))
+                {
+                    DispatchStanza(std::move(Document));
+                }
+                break;
+        default:
+            break;
+        }
+
+        //CheckForStreamEnd();
     }
 
     void Connection::Reset()
@@ -511,7 +571,8 @@ else std::cout
         MyJID(RequestedJID),
         Verification(Verification),
         VerificationMode(VerificationMode),
-        Authentication(nullptr)
+        Authentication(nullptr),
+        SAXParser(nullptr)
     {
         Roster = new RosterMaintaner (Client,
                PresenceHandler,
@@ -549,7 +610,6 @@ else std::cout
                         Hostname,
                         Portnumber,
                         boost::bind(&Connection::ClientDisconnected, this),
-                        boost::bind(&Connection::ClientGotData, this),
                         DebugTreshold ) );
 
 
@@ -566,11 +626,22 @@ else std::cout
         Client->AsyncRead();
         Roster->ResetClient(Client);
 
+        SAXParser = xercesc::XMLReaderFactory::createXMLReader();
+        SAXParser->setFeature(XMLUni::fgXercesSchema, false);   // optional
+        SAXParser->setFeature(XMLUni::fgSAX2CoreValidation, false);
+
+        SAXParser->setContentHandler(this);
+        SAXParser->setErrorHandler(this);
+
+
         // Fork io
         IOThread.reset(
                     new boost::thread(boost::bind(
                                           &boost::asio::io_service::run,
                                           io_service.get())));
+
+        Network::AsyncTCPXMLClientXercesInputWrapper Deluxe(Client.get());
+        SAXParser->parse(Deluxe);
     }
 
     Connection::~Connection()
@@ -582,6 +653,16 @@ else std::cout
         DebugOut(DebugOutputTreshold::Debug) << "~Connection"  << std::endl;
     }
 
+    static void InitXerces()
+    {
+        static bool InitiatedXerces = false;
+        if( !InitiatedXerces )
+        {
+            XMLPlatformUtils::Initialize();
+            InitiatedXerces = true;
+        }
+    }
+
     SharedConnection Connection::Create( const std::string &Hostname,
                                          int Portnumber,
                                          const JID &RequestedJID,
@@ -590,6 +671,9 @@ else std::cout
                                          TLSVerification *Verification,
                                          DebugOutputTreshold DebugTreshold)
     {
+
+        InitXerces();
+
         ConnectionCallback *ConnectionHandler = dynamic_cast<ConnectionCallback*>  (Handler);
         StanzaCallback *StanzaHandler = dynamic_cast<StanzaCallback*> (Handler);
         PresenceCallback *PresenceHandler = dynamic_cast<PresenceCallback*>(Handler);
@@ -623,6 +707,7 @@ else std::cout
                                         TLSVerificationMode VerificationMode,
                                         DebugOutputTreshold DebugTreshold)
     {
+        InitXerces();
         ConnectionCallback *ConnectionHandler = dynamic_cast<ConnectionCallback*>  (Handler);
         StanzaCallback *StanzaHandler = dynamic_cast<StanzaCallback*> (Handler);
         PresenceCallback *PresenceHandler = dynamic_cast<PresenceCallback*>(Handler);
@@ -656,10 +741,10 @@ else std::cout
         CurrentConnectionState  = ConnectionState::ErrorUnknown;
         BrodcastConnectionState(ConnectionCallback::ConnectionState::ErrorUnknown);
     }
-    void Connection::ClientGotData()
+    /*void Connection::ClientGotData()
     {
         CheckStreamForValidXML();
-    }
+    }*/
 
 
 }

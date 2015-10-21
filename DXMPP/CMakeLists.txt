@@ -25,5 +25,5 @@ add_library(dxmpp
 )
 
 target_link_libraries (dxmpp
-    pugixml boost_thread boost_system ssl crypto cryptopp pthread dl expat
+    pugixml boost_thread boost_system ssl crypto cryptopp pthread dl expat xerces-c
 )
